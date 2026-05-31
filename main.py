@@ -1,312 +1,234 @@
-import io
-import os
-import time
-import bs4
-from bs4 import BeautifulSoup
-from ddgs import DDGS
-import pandas as pd
-import plotly.express as px
-import requests
 import streamlit as st
+import requests
+from bs4 import BeautifulSoup
+import pandas as pd
+import matplotlib.pyplot as plt
+import time
+import re
 
-
-# ==============================================================================
-# 段落一：系統核心主函數與原生 UI 介面部署
-# ==============================================================================
-def crawl_and_show_reviews():
-    # 使用最穩定的 Streamlit 原生語法部署標題與說明文字
-    st.title("🧪 cosme 美妝數據聲量統計分析")
-    st.write("輸入化妝品或保養品名稱，系統將自動啟動 RAG 動態檢索，進行最新評價採集與特徵統計。")
-
-    # 顯示標準輸入搜尋框與按鈕（垂直排列，防錯率最高）
-    query_item = st.text_input("請輸入欲查詢的產品項目：", placeholder="例如：DR.WU 達爾膚 杏仁酸")
-    search_button = st.button("開始搜尋")
-
-    # 設定偽裝瀏覽器 Headers，防範美妝論壇拒絕連線 (HTTP 403 錯誤)
+# ==========================================
+# 1. 爬蟲函數：抓取商品評論
+# ==========================================
+@st.cache_data(ttl=3600)
+def scrape_cosme_reviews(product_id, max_pages=10):
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     }
+    all_reviews_data = []
 
-    # 當使用者點擊按鈕且輸入框不為空時，正式觸發大數據采集與分析流程
-    if search_button and query_item:
+    for page in range(1, max_pages + 1):
+        url = f"https://www.cosme.net.tw/products/{product_id}/reviews?page={page}"
+        response = requests.get(url, headers=headers)
+        if response.status_code != 200:
+            break
 
-        # ==============================================================================
-        # 段落二：初始化大數據特徵關鍵字庫與審計計數器 (特徵工程準備)
-        # ==============================================================================
-        # 建立 10 大正面與負面指標的聲量統計字典
-        keyword_stats = {
-            "優點: 保濕滋潤": 0, "優點: 清爽控油": 0, "優點: 溫和不刺激": 0, "優點: 提亮美白": 0, "優點: 吸收快速": 0,
-            "缺點: 敏感紅腫": 0, "缺點: 黏膩厚重": 0, "缺點: 效果不明顯": 0, "缺點: 味道難聞": 0, "缺點: 長痘長粉刺": 0
-        }
+        soup = BeautifulSoup(response.text, 'html.parser')
+        review_blocks = soup.select('.uc-review.seo-review-with-title')
 
-        # 定義各指標在全網文本中進行比對的關鍵字特徵庫群組
-        mapping_keywords = {
-            "優點: 保濕滋潤": ["保濕", "滋潤", "補水", "水潤", "不乾"],
-            "優點: 清爽控油": ["清爽", "控油", "不油", "不黏", "霧面"],
-            "優點: 溫和不刺激": ["溫和", "不刺激", "修護", "舒緩", "穩定"],
-            "優點: 提亮美白": ["美白", "提亮", "變白", "淡斑", "光澤"],
-            "優點: 吸收快速": ["好吸收", "吸收快", "一下就吸收", "不悶"],
-            "缺點: 敏感紅腫": ["過敏", "泛紅", "刺痛", "紅腫", "發癢"],
-            "缺點: 黏膩厚重": ["黏膩", "油膩", "厚重", "很悶", "悶痘"],
-            "缺點: 效果不明顯": ["沒效果", "無感", "雞肋", "看不到效果", "普通"],
-            "缺點: 味道難聞": ["不好聞", "香精味", "怪味", "臭", "味道刺鼻"],
-            "缺點: 長痘長粉刺": ["長痘", "致痘", "長粉刺", "爆痘", "悶出粉刺"]
-        }
+        if len(review_blocks) == 0:
+            break
 
-        # 初始化資料審計追蹤變數 (Data Audit Metrics)
-        total_scraped = 0  # 總共蒐集評論數
-        actual_used = 0  # 實際採用評論數
-        matched_review_ids = set()  # 存放至少命中一個優缺點關鍵字的評論 ID 集合
-
-        # ==============================================================================
-        # 段落三：動態全網檢索與雙機制網頁爬蟲網路連線模組 (RAG 資料獲取)
-        # ==============================================================================
-        with st.status("正在檢索...", expanded=True) as status:
-            status.update(label=f"正在檢索關於 '{query_item}' 的相關網頁...")
-
-            # 構建模糊搜尋語法，擴大搜尋池
-            search_query = f"{query_item} 評價 心得 使用體驗"
-            target_urls = []
-
+        for block in review_blocks:
             try:
-                # 呼叫 2026 最新官方更名之 ddgs 套件進行動態搜尋，獲取前 3 個高相關網址
-                with DDGS() as ddgs:
-                    results = ddgs.text(query=search_query, max_results=3)
-                    for r in results:
-                        target_urls.append(r["href"])
-            except Exception as e:
-                st.error(f"搜尋引擎動態檢索連線異常: {e}")
-                return
+                rating_tag = block.select_one('.review-score')
+                rating = int(rating_tag.text.strip()) if rating_tag else 0
 
-            # 防呆機制：若全網找不到相關網頁則優雅結束
-            if not target_urls:
-                st.warning("未能搜尋到相關評價網頁，請嘗試更換產品關鍵字。")
-                return
+                content_tag = block.select_one('.three-line-dot.uc-content-link')
+                content = content_tag.text.strip() if content_tag else ""
 
-            all_reviews_data = []
-            review_id = 1
+                all_reviews_data.append({
+                    "rating": rating,
+                    "content": content
+                })
+            except Exception:
+                continue
 
-            # 遍歷搜尋到的目標網址，正式開始爬取內文
-            for index, url in enumerate(target_urls, start=1):
-                status.update(label=f"正在建立連線並分析數據來源網頁 ({index}/{len(target_urls)})...")
+        time.sleep(1)
 
-                try:
-                    # 使用 requests 建立即時連線，並設定 8 秒超時防護以防程式卡死
-                    response = requests.get(url, headers=headers, timeout=8)
+    return all_reviews_data
 
-                    # PyCharm 後台偵錯與效能監控日誌
-                    print(f"========= 正在測試連線 =========")
-                    print(f"目前嘗試網址: {url}")
-                    print(f"網頁回應代碼 (Status Code): {response.status_code}")
-                    print(f"下載的網頁字數: {len(response.text)}")
 
-                    # 狀態碼非 200 則優雅跳過該網頁
-                    if response.status_code != 200:
-                        continue
+# ==========================================
+# 2. 爬蟲函數：搜尋產品 (✨ 新增功能 ✨)
+# ==========================================
+@st.cache_data(ttl=3600)
+def search_cosme_products(keyword):
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+    }
+    # 組合 @cosme 的搜尋網址
+    url = f"https://www.cosme.net.tw/search/product?keyword={keyword}"
+    response = requests.get(url, headers=headers)
+    if response.status_code != 200:
+        return []
 
-                    # 自動識別網頁編碼，徹底防止繁體中文解析出亂碼
-                    response.encoding = response.apparent_encoding
-                    soup = BeautifulSoup(response.text, "html.parser")
+    soup = BeautifulSoup(response.text, 'html.parser')
+    products = []
+    seen_ids = set()
 
-                    # 撈取網頁標題，用於前端來源追蹤驗證
-                    web_title = soup.title.text.strip() if soup.title else "未知網頁標題"
+    # 尋找搜尋結果中所有指向產品頁面的超連結
+    for a in soup.find_all('a', href=True):
+        href = a['href']
+        # 尋找連結中符合 /products/數字 的格式
+        match = re.search(r'products/(\d+)$', href)
 
-                    # 嘗試定位標準 @cosme 評論元件
-                    review_containers = soup.find_all("div", class_="review-container")
+        if match:
+            product_id = match.group(1)
+            # 清理文字：將多個換行或空白取代為單一空白，確保選單顯示整齊
+            name = re.sub(r'\s+', ' ', a.text.strip())
 
-                    # ------------------------------------------------------------------
-                    # 核心演算法：雙機制自適應文本清洗與特徵匹配
-                    # ------------------------------------------------------------------
-                    if review_containers:
-                        # 核心機制 A: 強匹配 (精準解析標準 @cosme 評論頁面)
-                        total_scraped += len(review_containers)  # 計入總搜集評論基數
+            # 過濾掉沒有文字的圖片連結，並避免重複加入同一個商品
+            if product_id not in seen_ids and len(name) > 2:
+                # 擷取前 50 個字作為顯示名稱，避免抓到過長的無用敘述
+                display_name = name if len(name) < 50 else name[:50] + "..."
+                products.append({
+                    "id": product_id,
+                    "name": display_name
+                })
+                seen_ids.add(product_id)
 
-                        for container in review_containers[:5]:  # 每個網頁採樣前 5 筆高品質資料
-                            content_tag = container.find("div", class_="review-content")
-                            score_tag = container.find("div", class_="uc-rating-star")
+    return products
 
-                            content = content_tag.text.strip().replace("\n", " ") if content_tag else ""
-                            score = score_tag.text.strip() if score_tag else "正常評分"
+# ==========================================
+# 3. 核心分析區塊 (打包成函數，方便不同模式呼叫)
+# ==========================================
+# ==========================================
+# 3. 核心分析區塊 (進階版：蜜糖與毒藥分流)
+# ==========================================
+# ==========================================
+# 3. 核心分析區塊 (上下排列版)
+# ==========================================
+def run_analysis(product_id):
+    with st.spinner(f'正在抓取商品 {product_id} 的資料，請稍候...'):
+        results = scrape_cosme_reviews(product_id, max_pages=3)
 
-                            if content:
-                                current_id = review_id
-                                # 將結構化資料封裝入庫
-                                all_reviews_data.append({
-                                    "ID": current_id, "資料來源網站": "台灣 @cosme 美妝網",
-                                    "網頁標題說明": web_title[:25] + "...", "評分星等": score,
-                                    "摘要內文": content[:120] + "...", "原始網址連結": url
-                                })
-                                review_id += 1
-                                actual_used += 1  # 計入實際採用合格數
+        if not results:
+            st.error("無法抓取資料，可能是該商品沒有心得或網站結構改變。")
+            return
 
-                                # 對內文進行關鍵字矩陣特徵比對與累加
-                                for feature_name, keywords_list in mapping_keywords.items():
-                                    if any(kw in content for kw in keywords_list):
-                                        keyword_stats[feature_name] += 1
-                                        matched_review_ids.add(current_id)  # 記錄命中特徵之評論 ID
-                    else:
-                        # 核心機制 B: 弱匹配模糊採集 (相容 Dcard、美妝部落格或非標準規格網頁)
-                        potential_tags = soup.find_all(["p", "div", "span"])
-                        total_scraped += len(potential_tags)  # 計入總搜集文本段落數
+        st.success(f"✅ 成功抓取 {len(results)} 筆評論！")
+        df = pd.DataFrame(results)
 
-                        saved_count = 0
-                        for tag in potential_tags:
-                            text = tag.text.strip().replace("\n", " ")
+        # --- 第一區塊：原始資料表格 (在上) ---
+        st.subheader("📋 原始評論資料")
+        # 因為改成上下排列，高度可以稍微調低一點，避免佔用太多版面
+        st.dataframe(df, use_container_width=True, height=400)
 
-                            # 大數據自動去噪與過濾規則
-                            if len(text) > 15 and saved_count < 8:
-                                if any(keyword in text for keyword in
-                                       ["登入", "隱私權", "購物車", "版權所有", "Copyright"]):
-                                    continue
+        st.divider()  # 加上分隔線，讓視覺更舒服
 
-                                # 動態識別來源平台標籤
-                                platform = "Dcard 美妝板" if "dcard.tw" in url else "網路綜合開箱"
+        # --- 第二區塊：圖表分析 (在下) ---
+        st.subheader("📊 優點 vs 缺點")
 
-                                current_id = review_id
-                                all_reviews_data.append({
-                                    "ID": current_id, "資料來源網站": platform,
-                                    "網頁標題說明": web_title[:25] + "...", "評分星等": "用戶分享",
-                                    "摘要內文": text[:120] + "...", "原始網址連結": url
-                                })
-                                review_id += 1
-                                saved_count += 1
-                                actual_used += 1  # 計入實際採用合格數
+        # 1. 擴充並分類關鍵字庫
+        pros_keywords = ['保濕', '服貼', '提亮', '遮瑕', '清爽', '持久', '控油', '自然', '好推', '透亮', '好吸收',
+                         '溫和', '光澤', '不脫妝']
+        cons_keywords = ['黏膩', '痘痘', '粉刺', '脫妝', '暗沉', '乾', '浮粉', '厚重', '斑駁', '過敏', '卡粉', '起屑',
+                         '致痘']
 
-                                # 對模糊文本段落進行關鍵字矩陣特徵比對與累加
-                                for feature_name, keywords_list in mapping_keywords.items():
-                                    if any(kw in text for kw in keywords_list):
-                                        keyword_stats[feature_name] += 1
-                                        matched_review_ids.add(current_id)  # 記錄命中特徵之評論 ID
+        pros_counts = {kw: 0 for kw in pros_keywords}
+        cons_counts = {kw: 0 for kw in cons_keywords}
 
-                    time.sleep(0.3)
+        # 2. 結合星等與「簡單語意排除」來精準計數
+        for index, row in df.iterrows():
+            content = row['content']
+            rating = row['rating']
 
-                except Exception as e:
-                    print(f"解析外部網頁時發生非預期例外，已自動跳過。原因: {e}")
-                    continue
+            # 蜜糖邏輯：只看 4 星以上的正面評價
+            if rating >= 4:
+                for kw in pros_keywords:
+                    if kw in content:
+                        pros_counts[kw] += 1
 
-            status.update(label="數據採集與特徵工程計算完畢！", state="complete")
+            # 毒藥邏輯：只看 3 星以下的負面評價
+            if rating <= 3:
+                for kw in cons_keywords:
+                    if kw in content and f"不{kw}" not in content and f"沒長{kw}" not in content and f"不會{kw}" not in content:
+                        cons_counts[kw] += 1
 
-        # ==============================================================================
-        # 段落四：前端 大數據審計指標面板渲染
-        # ==============================================================================
-        retention_rate = (actual_used / total_scraped * 100) if total_scraped > 0 else 0
-        keyword_scanned_count = len(matched_review_ids)
+        # 3. 過濾掉次數為 0 的字，並由大到小排序
+        pros_filtered = {k: v for k, v in sorted(pros_counts.items(), key=lambda item: item[1], reverse=True) if v > 0}
+        cons_filtered = {k: v for k, v in sorted(cons_counts.items(), key=lambda item: item[1], reverse=True) if v > 0}
 
-        if all_reviews_data:
-            st.markdown("### 📊 大數據採集與審計指標監控面板")
-            # 建立三欄並排排版，將大數據漏斗模型可視化呈現
-            m1, m2, m3 = st.columns(3)
-            with m1:
-                st.metric(label="📥 總共搜集評論段落數", value=f"{total_scraped} 筆")
-            with m2:
-                st.metric(label="🧼 實際採用結構評論數", value=f"{actual_used} 筆",
-                          delta=f"數據過濾留存率 {retention_rate:.1f}%")
-            with m3:
-                st.metric(label="🎯 關鍵字清單採計之評論數", value=f"{keyword_scanned_count} 筆",
-                          help="指經過文本特徵工程比對後，內文含有至少一項核心優缺點關鍵字之高參考價值評論總數")
+        # 設定圖表字體 (Windows 用戶請將 'Arial Unicode MS' 改為 'Microsoft JhengHei')
+        plt.rcParams['font.sans-serif'] = ['Arial Unicode MS']
+        plt.rcParams['axes.unicode_minus'] = False
 
-            st.markdown("---")
+        # --- 畫圖：蜜糖榜單 ---
+        st.markdown("#### 💖 優點 (最常提及)")
+        if pros_filtered:
+            # 調整圖表大小，寬度拉長一點
+            fig1, ax1 = plt.subplots(figsize=(8, 4))
+            y_pos = list(pros_filtered.keys())[::-1]
+            x_vals = list(pros_filtered.values())[::-1]
 
-        # ==============================================================================
-        # 段落五：實時評價清單資料表與標準 Excel (.xlsx) 多工作表打包匯出模組
-        # ==============================================================================
-        st.subheader(f"📋 「{query_item}」 最新採集評價清單")
+            bars1 = ax1.barh(y_pos, x_vals, color='#ffb3ba')
+            ax1.set_xlabel('提及次數')
 
-        if all_reviews_data:
-            # 將明細資料轉換為 Pandas 資料表，並依照 2026 最新 Streamlit 語法進行展延排版
-            df = pd.DataFrame(all_reviews_data)
-            st.dataframe(df, width='stretch', hide_index=True)
+            for i, v in enumerate(x_vals):
+                ax1.text(v + 0.1, i, str(v), va='center')
 
-            # 組裝第一個 Sheet 的數據：將大數據審計元數據 (Metadata) 打包
-            summary_data = {
-                "審計項目指標": [
-                    "查詢目標產品名稱", "總共蒐集評論段落數 (Total Scraped)",
-                    "實際採用結構評論數 (Actual Used)", "數據過濾保留率 (Retention Rate)",
-                    "關鍵字清單採計之評論數 (Keyword Matched)"
-                ],
-                "統計數值結果": [
-                    query_item, f"{total_scraped} 筆", f"{actual_used} 筆",
-                    f"{retention_rate:.2f}%", f"{keyword_scanned_count} 筆"
-                ],
-                "備註說明": [
-                    "使用者在系統輸入的查詢產品關鍵字", "網路底層採集到的所有原始 HTML 文字段落總數",
-                    "通過系統去噪、長度過濾規則後，留存之高品質真實評論數",
-                    "實際採用評論佔總搜集評論之百分比（指標越高代表數據原生髒噪越少）",
-                    "經過美妝特徵庫比對，內文含有至少一項核心優缺點之有效評論基數"
-                ]
-            }
-            summary_df = pd.DataFrame(summary_data)
-
-            # 在記憶體中建立一個虛擬的二進位檔案流 (BytesIO Object)
-            excel_buffer = io.BytesIO()
-
-            # 使用 ExcelWriter 進行多 Sheets 壓縮寫入作業
-            with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
-                summary_df.to_excel(writer, sheet_name="數據審計摘要", index=False)
-                df.to_excel(writer, sheet_name="明細資料清單", index=False)
-
-            excel_buffer.seek(0)
-
-            # 部署標準 Excel 下載按鈕
-            st.download_button(
-                label="📥 下載本次搜尋評價 Excel 檔 (.xlsx)",
-                data=excel_buffer,
-                file_name=f"{query_item}_reviews.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-
-            # ==============================================================================
-            # 段落六：Plotly 負向/正向聲量對比交互式統計圖表渲染
-            # ==============================================================================
-            st.markdown("---")
-            st.subheader(f"📈 特徵分析：「{query_item}」 優缺點聲量分佈統計圖")
-
-            # 將特徵計數字典轉換為圖表專用 DataFrame
-            chart_data = pd.DataFrame({
-                "特徵指標": list(keyword_stats.keys()),
-                "提及次數 (頻率)": list(keyword_stats.values()),
-                "性質": ["正面優點" if "優點" in k else "負面地雷" for k in keyword_stats.keys()]
-            })
-
-            chart_data = chart_data[chart_data["提及次數 (頻率)"] > 0]
-
-            if not chart_data.empty:
-                # 呼叫 Plotly Express 建立標準水平長條圖
-                fig = px.bar(
-                    chart_data,
-                    x="提及次數 (頻率)",
-                    y="特徵指標",
-                    color="性質",
-                    orientation="h",
-                    title=f"文字探勘：消費者核心關注點分佈圖",
-                    color_discrete_map={"正面優點": "#22c55e", "負面地雷": "#ef4444"},
-                    template="plotly_white"
-                )
-
-                fig.update_layout(
-                    yaxis={'categoryorder': 'total ascending'},
-                    margin=dict(l=150, r=20, t=50, b=50),
-                    showlegend=True
-                )
-
-                # ==========================================================
-                # 【這裡是新增的部分】: 強制 Plotly X 軸刻度間隔為整數 1，徹底消除小數點
-                # ==========================================================
-                fig.update_xaxes(dtick=1)
-
-                # ==========================================================
-                # 將 use_container_width=True 替換為 2026 全新寫法 width='stretch'
-                # ==========================================================
-                st.plotly_chart(fig, width='stretch')
-            else:
-                st.info("💡 提示：本次採集的網路文字樣本較少，未達優缺點關鍵字顯著統計標準，故不單獨顯示統計圖表。")
-
+            st.pyplot(fig1)
         else:
-            st.info("未能成功從目標網頁中提取出有效結構文字，請再試一次。")
+            st.info("這款產品目前抓取的好評中，沒有對應到優點的關鍵字。")
 
+        st.divider()
 
-# ==============================================================================
-# 獨立腳本入口點 (Entry Point) 驗證
-# ==============================================================================
-if __name__ == "__main__":
-    crawl_and_show_reviews()
+        # --- 畫圖：毒藥榜單 ---
+        st.markdown("#### ☠️ 負評 (最常提及)")
+        if cons_filtered:
+            fig2, ax2 = plt.subplots(figsize=(8, 4))
+            y_pos2 = list(cons_filtered.keys())[::-1]
+            x_vals2 = list(cons_filtered.values())[::-1]
+
+            bars2 = ax2.barh(y_pos2, x_vals2, color='#b3cde0')
+            ax2.set_xlabel('提及次數')
+
+            for i, v in enumerate(x_vals2):
+                ax2.text(v + 0.1, i, str(v), va='center')
+
+            st.pyplot(fig2)
+        else:
+            st.success("這款產品目前抓取的負評中，沒有對應到任何缺點的關鍵字。")
+
+# ==========================================
+# 4. Streamlit 網頁介面設計
+# ==========================================
+st.set_page_config(page_title="@cosme 美妝數據聲量統計分析", layout="wide")
+st.title("💄 @cosme 美妝數據聲量統計分析")
+st.markdown("搜尋產品或輸入網址，自動抓取評論並分析。")
+
+# 使用分頁 (Tabs) 讓介面看起來更專業
+tab1, tab2 = st.tabs(["🔍 關鍵字搜尋產品", "🔗 直接輸入產品網址"])
+
+# --- 第一頁：搜尋模式 ---
+with tab1:
+    keyword = st.text_input("請輸入美妝產品名稱（例如：雅詩蘭黛 粉底液）：")
+
+    if keyword:
+        with st.spinner("正在搜尋相關產品..."):
+            search_results = search_cosme_products(keyword)
+
+        if search_results:
+            # 將抓到的產品清單轉換為下拉式選單的選項格式
+            options = {f"{p['name']} (ID: {p['id']})": p['id'] for p in search_results}
+
+            # 讓使用者透過下拉選單選擇
+            selected_option = st.selectbox("請選擇目標產品：", list(options.keys()))
+
+            # 加入一個按鈕，點擊後才開始爬蟲，避免每次選單切換就直接跑分析
+            if st.button("開始分析此產品", type="primary"):
+                target_id = options[selected_option]
+                run_analysis(target_id)
+        else:
+            st.warning("找不到相關產品，請嘗試縮短關鍵字或換個說法。")
+
+# --- 第二頁：網址模式 ---
+with tab2:
+    target_url = st.text_input("請輸入 @cosme 產品頁面網址：", "https://www.cosme.net.tw/products/104761")
+    if target_url:
+        if st.button("開始爬蟲此網址", type="primary"):
+            match = re.search(r'products/(\d+)', target_url)
+            if not match:
+                st.warning("⚠️ 請輸入有效的 @cosme 產品網址（需包含 products/商品編號）")
+            else:
+                run_analysis(match.group(1))
