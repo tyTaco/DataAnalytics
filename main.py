@@ -2,9 +2,10 @@ import streamlit as st
 import requests
 from bs4 import BeautifulSoup
 import pandas as pd
-import matplotlib.pyplot as plt
+import plotly.express as px  # 改用 plotly.express
 import time
 import re
+
 
 # ==========================================
 # 1. 爬蟲函數：抓取商品評論
@@ -49,14 +50,13 @@ def scrape_cosme_reviews(product_id, max_pages=10):
 
 
 # ==========================================
-# 2. 爬蟲函數：搜尋產品 (✨ 新增功能 ✨)
+# 2. 爬蟲函數：搜尋產品
 # ==========================================
 @st.cache_data(ttl=3600)
 def search_cosme_products(keyword):
     headers = {
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
     }
-    # 組合 @cosme 的搜尋網址
     url = f"https://www.cosme.net.tw/search/product?keyword={keyword}"
     response = requests.get(url, headers=headers)
     if response.status_code != 200:
@@ -66,20 +66,15 @@ def search_cosme_products(keyword):
     products = []
     seen_ids = set()
 
-    # 尋找搜尋結果中所有指向產品頁面的超連結
     for a in soup.find_all('a', href=True):
         href = a['href']
-        # 尋找連結中符合 /products/數字 的格式
         match = re.search(r'products/(\d+)$', href)
 
         if match:
             product_id = match.group(1)
-            # 清理文字：將多個換行或空白取代為單一空白，確保選單顯示整齊
             name = re.sub(r'\s+', ' ', a.text.strip())
 
-            # 過濾掉沒有文字的圖片連結，並避免重複加入同一個商品
             if product_id not in seen_ids and len(name) > 2:
-                # 擷取前 50 個字作為顯示名稱，避免抓到過長的無用敘述
                 display_name = name if len(name) < 50 else name[:50] + "..."
                 products.append({
                     "id": product_id,
@@ -90,13 +85,10 @@ def search_cosme_products(keyword):
     return products
 
 # ==========================================
-# 3. 核心分析區塊 (打包成函數，方便不同模式呼叫)
+# 3. 核心分析區塊 (改用 Plotly 互動式圖表)
 # ==========================================
 # ==========================================
-# 3. 核心分析區塊 (進階版：蜜糖與毒藥分流)
-# ==========================================
-# ==========================================
-# 3. 核心分析區塊 (上下排列版)
+# 3. 核心分析區塊 (改用 Plotly 互動式圖表 - 移除小數點版)
 # ==========================================
 def run_analysis(product_id):
     with st.spinner(f'正在抓取商品 {product_id} 的資料，請稍候...'):
@@ -111,10 +103,9 @@ def run_analysis(product_id):
 
         # --- 第一區塊：原始資料表格 (在上) ---
         st.subheader("📋 原始評論資料")
-        # 因為改成上下排列，高度可以稍微調低一點，避免佔用太多版面
         st.dataframe(df, use_container_width=True, height=400)
 
-        st.divider()  # 加上分隔線，讓視覺更舒服
+        st.divider()
 
         # --- 第二區塊：圖表分析 (在下) ---
         st.subheader("📊 優點 vs 缺點")
@@ -133,13 +124,11 @@ def run_analysis(product_id):
             content = row['content']
             rating = row['rating']
 
-            # 蜜糖邏輯：只看 4 星以上的正面評價
             if rating >= 4:
                 for kw in pros_keywords:
                     if kw in content:
                         pros_counts[kw] += 1
 
-            # 毒藥邏輯：只看 3 星以下的負面評價
             if rating <= 3:
                 for kw in cons_keywords:
                     if kw in content and f"不{kw}" not in content and f"沒長{kw}" not in content and f"不會{kw}" not in content:
@@ -149,46 +138,64 @@ def run_analysis(product_id):
         pros_filtered = {k: v for k, v in sorted(pros_counts.items(), key=lambda item: item[1], reverse=True) if v > 0}
         cons_filtered = {k: v for k, v in sorted(cons_counts.items(), key=lambda item: item[1], reverse=True) if v > 0}
 
-        # 設定圖表字體 (Windows 用戶請將 'Arial Unicode MS' 改為 'Microsoft JhengHei')
-        plt.rcParams['font.sans-serif'] = ['Arial Unicode MS']
-        plt.rcParams['axes.unicode_minus'] = False
-
-        # --- 畫圖：蜜糖榜單 ---
+        # --- 畫圖：優點榜單 (Plotly) ---
         st.markdown("#### 💖 優點 (最常提及)")
         if pros_filtered:
-            # 調整圖表大小，寬度拉長一點
-            fig1, ax1 = plt.subplots(figsize=(8, 4))
             y_pos = list(pros_filtered.keys())[::-1]
             x_vals = list(pros_filtered.values())[::-1]
 
-            bars1 = ax1.barh(y_pos, x_vals, color='#ffb3ba')
-            ax1.set_xlabel('提及次數')
+            fig1 = px.bar(
+                x=x_vals,
+                y=y_pos,
+                orientation='h',
+                text=x_vals,
+                labels={'x': '提及次數', 'y': '討論特徵'}
+            )
 
-            for i, v in enumerate(x_vals):
-                ax1.text(v + 0.1, i, str(v), va='center')
+            fig1.update_traces(marker_color='#ffb3ba', textposition='outside')
+            fig1.update_layout(
+                height=350,
+                margin=dict(l=0, r=20, t=20, b=0),
+                xaxis_title=None,
+                yaxis_title=None
+            )
+            # ✨ 新增：強制 X 軸為整數，且刻度間距為 1
+            fig1.update_xaxes(tickformat="d", dtick=1)
 
-            st.pyplot(fig1)
+            st.plotly_chart(fig1, use_container_width=True)
         else:
             st.info("這款產品目前抓取的好評中，沒有對應到優點的關鍵字。")
 
         st.divider()
 
-        # --- 畫圖：毒藥榜單 ---
+        # --- 畫圖：缺點榜單 (Plotly) ---
         st.markdown("#### ☠️ 負評 (最常提及)")
         if cons_filtered:
-            fig2, ax2 = plt.subplots(figsize=(8, 4))
             y_pos2 = list(cons_filtered.keys())[::-1]
             x_vals2 = list(cons_filtered.values())[::-1]
 
-            bars2 = ax2.barh(y_pos2, x_vals2, color='#b3cde0')
-            ax2.set_xlabel('提及次數')
+            fig2 = px.bar(
+                x=x_vals2,
+                y=y_pos2,
+                orientation='h',
+                text=x_vals2,
+                labels={'x': '提及次數', 'y': '討論特徵'}
+            )
 
-            for i, v in enumerate(x_vals2):
-                ax2.text(v + 0.1, i, str(v), va='center')
+            fig2.update_traces(marker_color='#b3cde0', textposition='outside')
+            fig2.update_layout(
+                height=350,
+                margin=dict(l=0, r=20, t=20, b=0),
+                xaxis_title=None,
+                yaxis_title=None
+            )
+            # ✨ 新增：強制 X 軸為整數，且刻度間距為 1
+            fig2.update_xaxes(tickformat="d", dtick=1)
 
-            st.pyplot(fig2)
+            st.plotly_chart(fig2, use_container_width=True)
         else:
             st.success("這款產品目前抓取的負評中，沒有對應到任何缺點的關鍵字。")
+
 
 # ==========================================
 # 4. Streamlit 網頁介面設計
@@ -197,10 +204,8 @@ st.set_page_config(page_title="@cosme 美妝數據聲量統計分析", layout="w
 st.title("💄 @cosme 美妝數據聲量統計分析")
 st.markdown("搜尋產品或輸入網址，自動抓取評論並分析。")
 
-# 使用分頁 (Tabs) 讓介面看起來更專業
 tab1, tab2 = st.tabs(["🔍 關鍵字搜尋產品", "🔗 直接輸入產品網址"])
 
-# --- 第一頁：搜尋模式 ---
 with tab1:
     keyword = st.text_input("請輸入美妝產品名稱（例如：雅詩蘭黛 粉底液）：")
 
@@ -209,20 +214,15 @@ with tab1:
             search_results = search_cosme_products(keyword)
 
         if search_results:
-            # 將抓到的產品清單轉換為下拉式選單的選項格式
             options = {f"{p['name']} (ID: {p['id']})": p['id'] for p in search_results}
-
-            # 讓使用者透過下拉選單選擇
             selected_option = st.selectbox("請選擇目標產品：", list(options.keys()))
 
-            # 加入一個按鈕，點擊後才開始爬蟲，避免每次選單切換就直接跑分析
             if st.button("開始分析此產品", type="primary"):
                 target_id = options[selected_option]
                 run_analysis(target_id)
         else:
             st.warning("找不到相關產品，請嘗試縮短關鍵字或換個說法。")
 
-# --- 第二頁：網址模式 ---
 with tab2:
     target_url = st.text_input("請輸入 @cosme 產品頁面網址：", "https://www.cosme.net.tw/products/104761")
     if target_url:
