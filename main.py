@@ -1,234 +1,312 @@
-import streamlit as st
-import requests
-from bs4 import BeautifulSoup
-import pandas as pd
-import plotly.express as px  # 改用 plotly.express
+## 成功抓取評論第一頁所有評論
 import time
-import re
+import random
+import pandas as pd
+import plotly.express as px
+import streamlit as st
+from bs4 import BeautifulSoup
+from curl_cffi import requests
 
+# ==============================================================================
+# Streamlit 網頁基本設定 (網頁標籤 title)
+# ==============================================================================
+st.set_page_config(page_title="@cosme 美妝分析統計", page_icon="💄", layout="centered")
 
-# ==========================================
-# 1. 爬蟲函數：抓取商品評論
-# ==========================================
-@st.cache_data(ttl=3600)
-def scrape_cosme_reviews(product_id, max_pages=10):
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    }
-    all_reviews_data = []
-
-    for page in range(1, max_pages + 1):
-        url = f"https://www.cosme.net.tw/products/{product_id}/reviews?page={page}"
-        response = requests.get(url, headers=headers)
-        if response.status_code != 200:
-            break
-
-        soup = BeautifulSoup(response.text, 'html.parser')
-        review_blocks = soup.select('.uc-review.seo-review-with-title')
-
-        if len(review_blocks) == 0:
-            break
-
-        for block in review_blocks:
-            try:
-                rating_tag = block.select_one('.review-score')
-                rating = int(rating_tag.text.strip()) if rating_tag else 0
-
-                content_tag = block.select_one('.three-line-dot.uc-content-link')
-                content = content_tag.text.strip() if content_tag else ""
-
-                all_reviews_data.append({
-                    "rating": rating,
-                    "content": content
-                })
-            except Exception:
-                continue
-
-        time.sleep(1)
-
-    return all_reviews_data
-
-
-# ==========================================
-# 2. 爬蟲函數：搜尋產品
-# ==========================================
-@st.cache_data(ttl=3600)
-def search_cosme_products(keyword):
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
-    }
-    url = f"https://www.cosme.net.tw/search/product?keyword={keyword}"
-    response = requests.get(url, headers=headers)
-    if response.status_code != 200:
-        return []
-
-    soup = BeautifulSoup(response.text, 'html.parser')
-    products = []
-    seen_ids = set()
-
-    for a in soup.find_all('a', href=True):
-        href = a['href']
-        match = re.search(r'products/(\d+)$', href)
-
-        if match:
-            product_id = match.group(1)
-            name = re.sub(r'\s+', ' ', a.text.strip())
-
-            if product_id not in seen_ids and len(name) > 2:
-                display_name = name if len(name) < 50 else name[:50] + "..."
-                products.append({
-                    "id": product_id,
-                    "name": display_name
-                })
-                seen_ids.add(product_id)
-
-    return products
-
-# ==========================================
-# 3. 核心分析區塊 (改用 Plotly 互動式圖表)
-# ==========================================
-# ==========================================
-# 3. 核心分析區塊 (改用 Plotly 互動式圖表 - 移除小數點版)
-# ==========================================
-def run_analysis(product_id):
-    with st.spinner(f'正在抓取商品 {product_id} 的資料，請稍候...'):
-        results = scrape_cosme_reviews(product_id, max_pages=3)
-
-        if not results:
-            st.error("無法抓取資料，可能是該商品沒有心得或網站結構改變。")
-            return
-
-        st.success(f"✅ 成功抓取 {len(results)} 筆評論！")
-        df = pd.DataFrame(results)
-
-        # --- 第一區塊：原始資料表格 (在上) ---
-        st.subheader("📋 原始評論資料")
-        st.dataframe(df, use_container_width=True, height=400)
-
-        st.divider()
-
-        # --- 第二區塊：圖表分析 (在下) ---
-        st.subheader("📊 優點 vs 缺點")
-
-        # 1. 擴充並分類關鍵字庫
-        pros_keywords = ['保濕', '服貼', '提亮', '遮瑕', '清爽', '持久', '控油', '自然', '好推', '透亮', '好吸收',
-                         '溫和', '光澤', '不脫妝']
-        cons_keywords = ['黏膩', '痘痘', '粉刺', '脫妝', '暗沉', '乾', '浮粉', '厚重', '斑駁', '過敏', '卡粉', '起屑',
-                         '致痘']
-
-        pros_counts = {kw: 0 for kw in pros_keywords}
-        cons_counts = {kw: 0 for kw in cons_keywords}
-
-        # 2. 結合星等與「簡單語意排除」來精準計數
-        for index, row in df.iterrows():
-            content = row['content']
-            rating = row['rating']
-
-            if rating >= 4:
-                for kw in pros_keywords:
-                    if kw in content:
-                        pros_counts[kw] += 1
-
-            if rating <= 3:
-                for kw in cons_keywords:
-                    if kw in content and f"不{kw}" not in content and f"沒長{kw}" not in content and f"不會{kw}" not in content:
-                        cons_counts[kw] += 1
-
-        # 3. 過濾掉次數為 0 的字，並由大到小排序
-        pros_filtered = {k: v for k, v in sorted(pros_counts.items(), key=lambda item: item[1], reverse=True) if v > 0}
-        cons_filtered = {k: v for k, v in sorted(cons_counts.items(), key=lambda item: item[1], reverse=True) if v > 0}
-
-        # --- 畫圖：優點榜單 (Plotly) ---
-        st.markdown("#### 💖 優點 (最常提及)")
-        if pros_filtered:
-            y_pos = list(pros_filtered.keys())[::-1]
-            x_vals = list(pros_filtered.values())[::-1]
-
-            fig1 = px.bar(
-                x=x_vals,
-                y=y_pos,
-                orientation='h',
-                text=x_vals,
-                labels={'x': '提及次數', 'y': '討論特徵'}
-            )
-
-            fig1.update_traces(marker_color='#ffb3ba', textposition='outside')
-            fig1.update_layout(
-                height=350,
-                margin=dict(l=0, r=20, t=20, b=0),
-                xaxis_title=None,
-                yaxis_title=None
-            )
-            # ✨ 新增：強制 X 軸為整數，且刻度間距為 1
-            fig1.update_xaxes(tickformat="d", dtick=1)
-
-            st.plotly_chart(fig1, use_container_width=True)
-        else:
-            st.info("這款產品目前抓取的好評中，沒有對應到優點的關鍵字。")
-
-        st.divider()
-
-        # --- 畫圖：缺點榜單 (Plotly) ---
-        st.markdown("#### ☠️ 負評 (最常提及)")
-        if cons_filtered:
-            y_pos2 = list(cons_filtered.keys())[::-1]
-            x_vals2 = list(cons_filtered.values())[::-1]
-
-            fig2 = px.bar(
-                x=x_vals2,
-                y=y_pos2,
-                orientation='h',
-                text=x_vals2,
-                labels={'x': '提及次數', 'y': '討論特徵'}
-            )
-
-            fig2.update_traces(marker_color='#b3cde0', textposition='outside')
-            fig2.update_layout(
-                height=350,
-                margin=dict(l=0, r=20, t=20, b=0),
-                xaxis_title=None,
-                yaxis_title=None
-            )
-            # ✨ 新增：強制 X 軸為整數，且刻度間距為 1
-            fig2.update_xaxes(tickformat="d", dtick=1)
-
-            st.plotly_chart(fig2, use_container_width=True)
-        else:
-            st.success("這款產品目前抓取的負評中，沒有對應到任何缺點的關鍵字。")
-
-
-# ==========================================
-# 4. Streamlit 網頁介面設計
-# ==========================================
-st.set_page_config(page_title="@cosme 美妝數據聲量統計分析", layout="wide")
 st.title("💄 @cosme 美妝數據聲量統計分析")
-st.markdown("搜尋產品或輸入網址，自動抓取評論並分析。")
+st.caption("本系統採用真人級 TLS 指紋隱匿技術，動態層級解析美妝輿情數據。")
+st.write("---")
 
-tab1, tab2 = st.tabs(["🔍 關鍵字搜尋產品", "🔗 直接輸入產品網址"])
+# ==============================================================================
+# 初始化 Session State 狀態機
+# ==============================================================================
+if "product_list" not in st.session_state:
+    st.session_state.product_list = []
+if "last_search_kw" not in st.session_state:
+    st.session_state.last_search_kw = ""
+if "step" not in st.session_state:
+    st.session_state.step = 1
+# 【本次新增】建立分析結果的「硬碟級快取記憶體」，專門防止下載按鈕引發重新爬取
+if "df_reviews_cache" not in st.session_state:
+    st.session_state.df_reviews_cache = None
+if "df_stats_cache" not in st.session_state:
+    st.session_state.df_stats_cache = None
 
-with tab1:
-    keyword = st.text_input("請輸入美妝產品名稱（例如：雅詩蘭黛 粉底液）：")
 
-    if keyword:
-        with st.spinner("正在搜尋相關產品..."):
-            search_results = search_cosme_products(keyword)
+# ==============================================================================
+# 核心後端功能
+# ==============================================================================
+def fetch_products(keyword):
+    """Step 1~3: 進入網站並取得搜尋結果"""
+    search_url = f"https://www.cosme.net.tw/search/product?keyword={keyword}"
+    try:
+        response = requests.get(search_url, impersonate="chrome", timeout=10)
+        if response.status_code == 200:
+            search_soup = BeautifulSoup(response.text, "html.parser")
+            product_list = []
+            all_links = search_soup.find_all("a", href=True)
 
-        if search_results:
-            options = {f"{p['name']} (ID: {p['id']})": p['id'] for p in search_results}
-            selected_option = st.selectbox("請選擇目標產品：", list(options.keys()))
+            for item in all_links:
+                href = item['href']
+                text = item.get_text().strip()
+                if "/products/" in href and text:
+                    full_url = f"https://www.cosme.net.tw{href}" if href.startswith("/") else href
+                    if "篇" in text or href.endswith("/reviews"):
+                        continue
+                    if len(text) > 2 and full_url not in [p['url'] for p in product_list]:
+                        product_list.append({"name": text, "url": full_url})
+            return product_list
+    except Exception as e:
+        st.error(f"連線發生錯誤：{e}")
+    return []
 
-            if st.button("開始分析此產品", type="primary"):
-                target_id = options[selected_option]
-                run_analysis(target_id)
+
+def scan_first_page_review_urls(reviews_base_url):
+    """快速精準定位並帶回第一頁主列表的所有評論網址"""
+    try:
+        reviews_response = requests.get(reviews_base_url, impersonate="chrome", timeout=10)
+        if reviews_response.status_code != 200:
+            return [], None
+
+        reviews_soup = BeautifulSoup(reviews_response.text, "html.parser")
+        review_urls = []
+
+        main_review_area = reviews_soup.select_one(".reviews-list, .review-container, #review-list, .main-content")
+        search_target = main_review_area if main_review_area else reviews_soup
+
+        for a_tag in search_target.find_all("a", href=True):
+            r_href = a_tag['href']
+            if "/reviews/" in r_href and not r_href.endswith("/reviews") and not "products" in r_href:
+                full_review_url = f"https://www.cosme.net.tw{r_href}" if r_href.startswith("/") else r_href
+                if full_review_url not in review_urls:
+                    review_urls.append(full_review_url)
+
+        if not review_urls:
+            for a_tag in reviews_soup.find_all("a", href=True):
+                r_href = a_tag['href']
+                if "/reviews/" in r_href and not r_href.endswith("/reviews") and not "products" in r_href:
+                    full_review_url = f"https://www.cosme.net.tw{r_href}" if r_href.startswith("/") else r_href
+                    if full_review_url not in review_urls:
+                        review_urls.append(full_review_url)
+
+        return review_urls, reviews_soup
+    except Exception:
+        return [], None
+
+
+# ==============================================================================
+# 一級畫面：搜尋框
+# ==============================================================================
+current_input = st.text_input("🔍 請輸入欲搜尋之產品名稱或品牌（輸入完請按 Enter）：", key="search_keyword")
+
+if current_input and current_input != st.session_state.last_search_kw:
+    st.session_state.product_list = []
+    st.session_state.step = 1
+    st.session_state.df_reviews_cache = None  # 【本次新增】換產品時，清空分析舊快取
+    st.session_state.df_stats_cache = None
+    if "active_product" in st.session_state:
+        del st.session_state.active_product
+
+    with st.spinner("『關鍵字變更』已重置舊數據，正在檢索新產品數據中..."):
+        results = fetch_products(current_input)
+        if results:
+            st.session_state.product_list = results
+            st.session_state.last_search_kw = current_input
+            st.session_state.step = 2
+            st.rerun()
         else:
-            st.warning("找不到相關產品，請嘗試縮短關鍵字或換個說法。")
+            st.session_state.last_search_kw = current_input
+            st.error("未能找到相關產品，請嘗試更換關鍵字。")
 
-with tab2:
-    target_url = st.text_input("請輸入 @cosme 產品頁面網址：", "https://www.cosme.net.tw/products/104761")
-    if target_url:
-        if st.button("開始爬蟲此網址", type="primary"):
-            match = re.search(r'products/(\d+)', target_url)
-            if not match:
-                st.warning("⚠️ 請輸入有效的 @cosme 產品網址（需包含 products/商品編號）")
-            else:
-                run_analysis(match.group(1))
+# ==============================================================================
+# 二級畫面：產品選單
+# ==============================================================================
+if st.session_state.step >= 2 and st.session_state.product_list:
+    st.write("### 🗂️ 請選擇目標完整產品名稱")
+
+    prod_options = st.session_state.product_list
+    dynamic_dropdown_key = f"select_{st.session_state.last_search_kw}"
+
+
+    def get_display_label(prod_obj):
+        prod_id = prod_obj["url"].split("/")[-1]
+        return f"{prod_obj['name']}  (商品ID: {prod_id})"
+
+
+    selected_prod_object = st.selectbox(
+        "選擇產品：",
+        options=prod_options,
+        format_func=get_display_label,
+        key=dynamic_dropdown_key
+    )
+
+    if st.button("🚀 確定選擇此產品並開始文本探勘"):
+        st.session_state.active_product = selected_prod_object
+        st.session_state.step = 3
+        st.session_state.df_reviews_cache = None  # 【本次新增】換選商品時，重置舊快取
+        st.session_state.df_stats_cache = None
+        st.rerun()
+
+# ==============================================================================
+# 三級畫面：Excel 下載與 Plotly 數據視覺化 (【本次修正】導入快取防禦阻斷機制)
+# ==============================================================================
+if st.session_state.step == 3 and "active_product" in st.session_state:
+    if st.button("⬅️ 返回重新選擇商品"):
+        st.session_state.step = 2
+        st.session_state.df_reviews_cache = None
+        st.session_state.df_stats_cache = None
+        st.rerun()
+
+    st.write("---")
+    st.write(f"### 📊 正在深度解構：`{st.session_state.active_product['name']}`")
+
+    reviews_base_url = f"{st.session_state.active_product['url']}/reviews"
+
+    # --------------------------------------------------------------------------
+    # 【本次修正核心】快取防禦鎖：如果快取是空的，才進去跑網路爬蟲；若已有資料則直接讀取
+    # --------------------------------------------------------------------------
+    if st.session_state.df_reviews_cache is None:
+
+        review_urls, reviews_soup = scan_first_page_review_urls(reviews_base_url)
+        total_to_crawl = len(review_urls)
+
+        if total_to_crawl > 0:
+            meta_info_box = st.empty()
+            progress_bar = st.progress(0)
+            live_log_box = st.empty()
+
+            pos_kws = [
+                # 質地與觸感
+                "好吸收", "好推勻", "延展度佳", "保濕", "不黏膩", "清爽", "滋潤", "水潤", "溫和", "輕透", "零負擔",
+                "柔嫩", "滑嫩",
+                # 妝效與外觀
+                "明亮", "透亮", "光澤", "提亮", "服貼", "自然", "修飾", "遮瑕", "均勻膚色", "奶油肌",
+                # 功效與持久度
+                "持久", "控油", "不脫妝", "不暗沉", "穩定", "緊緻", "舒緩", "鎮定", "鎖水",
+            ]
+
+            neg_kws = [
+                # 質地與觸感
+                "黏膩", "悶感", "悶", "厚重", "油膩", "乾澀", "緊繃", "難推", "搓泥",
+                # 膚況反應 (刺激性)
+                "致痘", "爆痘", "粉刺", "過敏", "刺痛", "熏眼", "辣眼睛", "紅腫", "發癢", "泛紅", "刺激", "刺眼",
+                "刺鼻", "太香",
+                # 妝效災難
+                "起屑", "卡粉", "浮粉", "脫妝", "暗沉", "斑駁", "起皮", "泛白", "假白", "面具感", "假面", "顯毛孔",
+                "顯紋理", "不持久", "太乾", "很乾"
+            ]
+
+            all_data = []
+            kw_stats = {"特徵詞": [], "次數": [], "評價屬性": []}
+            pos_counter = {k: 0 for k in pos_kws}
+            neg_counter = {k: 0 for k in neg_kws}
+
+            start_time = time.time()
+
+            for idx, r_url in enumerate(review_urls):
+                current_count = idx + 1
+                progress_percent = current_count / total_to_crawl
+
+                elapsed_time = time.time() - start_time
+                avg_time = elapsed_time / current_count if current_count > 0 else 1.8
+                eta_seconds = (total_to_crawl - current_count) * avg_time
+                eta_string = f"{int(eta_seconds // 60)} 分 {int(eta_seconds % 60)} 秒" if eta_seconds > 60 else f"{int(eta_seconds)} 秒"
+
+                meta_info_box.markdown(f"""
+                <div style="background-color: #f0f2f6; padding: 15px; border-radius: 10px; margin-bottom: 10px; border-left: 5px solid #1f77b4;">
+                    <h4 style="margin-top:0; color: #1f77b4; font-family: sans-serif;">⏳ 輿情分析引擎全速解構中</h4>
+                    <ul style="list-style-type: none; padding-left: 5px; font-family: sans-serif; line-height: 1.6;">
+                        <li><b>目前進度：</b> <code style="font-size:1.1em; background-color:#fff; padding:2px 6px; border-radius:4px;">[{current_count} / {total_to_crawl}]</code> 🚀 <b>{progress_percent * 100:.1f}%</b></li>
+                        <li><b>已耗時間：</b> {int(elapsed_time // 60)} 分 {int(elapsed_time % 60)} 秒</li>
+                        <li><b>預估剩餘時間 (ETA)：</b> <span style="color:#e74c3c; font-weight:bold;">{eta_string}</span></li>
+                    </ul>
+                </div>
+                """, unsafe_allow_html=True)
+
+                progress_bar.progress(progress_percent)
+                live_log_box.caption(f"🔗 [實時文本分析中] 正在閱覽評論網址： {r_url}")
+
+                time.sleep(random.uniform(1.0, 2.2))
+
+                try:
+                    r_resp = requests.get(r_url, impersonate="chrome", timeout=10)
+                    if r_resp.status_code == 200:
+                        r_soup = BeautifulSoup(r_resp.text, "html.parser")
+                        text_block = r_soup.select_one(".review-content, .comment-content, .card-body")
+                        if text_block:
+                            content = text_block.get_text().strip()
+
+                            # === 【修改這裡】加入簡單語意排除邏輯 ===
+                            # 1. 處理正面特徵
+                            for k in pos_kws:
+                                if k in content:
+                                    # 排除「不保濕」、「不好吸收」等狀況
+                                    if f"不{k}" not in content and f"沒{k}" not in content:
+                                        pos_counter[k] += 1
+
+                            # 2. 處理負面特徵 (解決不黏膩被歸類為黏膩的問題)
+                            for k in neg_kws:
+                                if k in content:
+                                    # 排除「不黏膩」、「沒致痘」、「不會過敏」、「沒長粉刺」等狀況
+                                    if f"不{k}" not in content and f"沒{k}" not in content and f"不會{k}" not in content and f"沒長{k}" not in content:
+                                        neg_counter[k] += 1
+                            # ==================================
+
+                            all_data.append({"評論網址": r_url, "心得摘要截斷": content[:100] + "..."})
+                    elif r_resp.status_code == 403:
+                        live_log_box.error("⚠️ 觸發網頁高頻保護機制！系統自動進入 10 秒冷卻冬眠後繼續推進...")
+                        time.sleep(10)
+                except Exception:
+                    continue
+
+            meta_info_box.empty()
+            progress_bar.empty()
+            live_log_box.empty()
+
+            # 爬取完成，將結果打包存入快取記憶體中鎖定
+            st.session_state.df_reviews_cache = pd.DataFrame(all_data)
+
+            for k, v in pos_counter.items():
+                if v > 0:
+                    kw_stats["特徵詞"].append(k);
+                    kw_stats["次數"].append(v);
+                    kw_stats["評價屬性"].append("正面評價")
+            for k, v in neg_counter.items():
+                if v > 0:
+                    kw_stats["特徵詞"].append(k);
+                    kw_stats["次數"].append(v);
+                    kw_stats["評價屬性"].append("負面評價")
+            st.session_state.df_stats_cache = pd.DataFrame(kw_stats)
+            st.rerun()  # 儲存完快取，手動刷新一次直接進入渲染場景
+
+        else:
+            st.error("該產品主評論區未發現可爬取的評論連結。")
+
+    # --------------------------------------------------------------------------
+    # 最終渲染場景：【本次新增】直接讀取快取數據，點擊下載再也不會驚動爬蟲！
+    # --------------------------------------------------------------------------
+    if st.session_state.df_reviews_cache is not None and not st.session_state.df_reviews_cache.empty:
+        st.success(f"🎉 全流水線大功告成！已成功分析第一頁共 {len(st.session_state.df_reviews_cache)} 篇真實消費者數據。")
+
+        st.write("#### 📥 1. 輿情數據下載 (Excel / CSV)")
+        csv_data = st.session_state.df_reviews_cache.to_csv(index=False).encode('utf-8-sig')
+
+        # 這裡點擊下載，雖然網頁會重整，但因為上面查到 cache 有資料，會秒速通過，絕對不會重爬！
+        st.download_button(
+            label="📥 點擊下載產品評論與網址匯總表 (Excel可開)",
+            data=csv_data,
+            file_name=f"{st.session_state.active_product['name']}_評論匯總.csv",
+            mime="text/csv"
+        )
+        st.dataframe(st.session_state.df_reviews_cache, use_container_width=True)
+
+        st.write("#### 📈 2. 產品優缺點特徵聲量統計圖 (Plotly)")
+        if st.session_state.df_stats_cache is not None and not st.session_state.df_stats_cache.empty:
+            fig = px.bar(
+                st.session_state.df_stats_cache, x="特徵詞", y="次數", color="評價屬性",
+                title=f"{st.session_state.active_product['name']} - 輿情關鍵字詞頻分佈",
+                barmode="group",
+                color_discrete_map={"正面評價": "#2ecc71", "負面評價": "#e74c3c"}
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("該產品的樣本評論中，暫時未匹配到核心優缺點字典特徵詞。")
